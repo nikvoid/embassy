@@ -254,7 +254,7 @@ impl<'d, T: Instance, E: channel::Type, D: channel::Direction> Channel<'d, T, E,
         }).await;
     }
     
-    // FIXME: RX Timeout with LS device on hub
+    // TODO: Workaround for RX timeout with LS device on slow hub
     /// Start transaction and wait it to be complete
     async fn wait_transaction(&self) -> Result<(), ChannelError> {
         assert!(!Self::is_interrupt_in());
@@ -264,7 +264,7 @@ impl<'d, T: Instance, E: channel::Type, D: channel::Direction> Channel<'d, T, E,
         regs.inte().modify(|w| {
             w.set_trans_complete(true);
             w.set_stall(true);
-            w.set_error_rx_timeout(false);
+            w.set_error_rx_timeout(true);
             w.set_error_rx_overflow(true);
         });
         
@@ -288,10 +288,10 @@ impl<'d, T: Instance, E: channel::Type, D: channel::Direction> Channel<'d, T, E,
                 regs.sie_status().write_clear(|w| w.set_stall_rec(true));
                 return Poll::Ready(Err(ChannelError::Stall))
             }
-            // if stat.rx_timeout() {
-            //     regs.sie_status().write_clear(|w| w.set_rx_timeout(true));
-            //     return Poll::Ready(Err(ChannelError::Timeout))
-            // }
+            if stat.rx_timeout() {
+                regs.sie_status().write_clear(|w| w.set_rx_timeout(true));
+                return Poll::Ready(Err(ChannelError::Timeout))
+            }
             if stat.rx_overflow() {
                 regs.sie_status().write_clear(|w| w.set_rx_overflow(true));
                 return Poll::Ready(Err(ChannelError::BufferOverflow))
@@ -788,14 +788,17 @@ impl<T: Instance> interrupt::typelevel::Handler<T::Interrupt> for InterruptHandl
             }
             else if ints.error_crc() {
                 regs.sie_status().write_clear(|w| w.set_crc_error(true));
+                warn!("USB Data integrity: CRC error");
                 "crc error"
             }
             else if ints.error_bit_stuff() {
                 regs.sie_status().write_clear(|w| w.set_bit_stuff_error(true));
+                warn!("USB Data integrity: bit stuffing error");
                 "bit stuff error"
             }
             else if ints.error_data_seq() {
                 regs.sie_status().write_clear(|w| w.set_data_seq_error(true));
+                warn!("USB Data integrity: data sequence error");
                 "data sequence error"
             }
             else if ints.stall() {
