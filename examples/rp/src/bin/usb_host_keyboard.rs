@@ -5,7 +5,7 @@ use defmt::*;
 use embassy_executor::Spawner;
 use embassy_rp::{bind_interrupts, gpio, peripherals::USB};
 use embassy_time::{Duration, Timer};
-use embassy_usb::host::{Channel, ControlChannelExt, DeviceDescriptor, USBDescriptor, UsbDeviceRegistry, UsbHost};
+use embassy_usb::host::{descriptor::*, hub, Channel, ControlChannelExt, Device, UsbDeviceRegistry, UsbHost};
 use embassy_usb_driver::host::{channel, UsbHostDriver};
 use gpio::{Level, Output};
 use heapless::Vec;
@@ -28,7 +28,7 @@ async fn main(spawner: Spawner) {
 
     info!("Start USB driver");
 
-    static HOST_REGISTRY: StaticCell<UsbDeviceRegistry<1>> = StaticCell::new();
+    static HOST_REGISTRY: StaticCell<UsbDeviceRegistry<4>> = StaticCell::new();
     let registry = HOST_REGISTRY.init(UsbDeviceRegistry::new());
 
     static HOST: StaticCell<UsbHost<embassy_rp::usb::host::Driver<'static, USB>>> = StaticCell::new();
@@ -36,51 +36,89 @@ async fn main(spawner: Spawner) {
 
     loop {
         let dev = host.poll().await.unwrap();
-        
-        info!("Found {} interfaces", dev.cfg_desc.num_interfaces);
+        select_usb_driver(spawner, dev, host).await;
+    }
+}
 
-        let interface0 = dev.cfg_desc.parse_interface(0).unwrap();
-        info!("Interface 0: {:?}", interface0);
+async fn select_usb_driver(
+    spawner: Spawner, 
+    dev: Device, 
+    host: &'static UsbHost<'_, impl UsbHostDriver>
+) {
+    // ================= DEBUG ====================
+    info!("Found {} interfaces", dev.cfg_desc.num_interfaces);
 
-        // let interface1 = dev.cfg_desc.parse_interface(1).unwrap();
-        // info!("Interface 1: {:?}", interface1);
+    let interface0 = dev.cfg_desc.parse_interface(0).unwrap();
+    info!("Interface 0: {:?}", interface0);
 
-        let endpoints = interface0.parse_endpoints::<4>();
+    // let interface1 = dev.cfg_desc.parse_interface(1).unwrap();
+    // info!("Interface 1: {:?}", interface1);
 
-        info!("Endpoints: {:?}", endpoints);
+    let endpoints = interface0.parse_endpoints::<4>();
 
-        if hid_keyboard::is_compatible(&interface0) {
-            let hid_desc: hid_keyboard::HIDDescriptor = interface0.parse_class_descriptor().unwrap();
-            info!("HID descriptor: {:?}", hid_desc);
+    info!("Endpoints: {:?}", endpoints);
+    // ================ DEBUG =====================
 
-            {
-                // Request report descriptor
-                let mut buffer = [0u8; 128];
-
-                // Control channel should be unlocked after use 
-                let mut cc = host.control_channel(dev.addr).await.unwrap();
-            
-                let request_buffer = &mut buffer[..hid_desc.descriptor_length0 as usize];
-                cc.interface_request_descriptor_bytes::<ReportDescriptor>(
-                    interface0.interface_number, 
-                    request_buffer
-                )
-                .await
-                .unwrap();
-            }
-
-            match hid_keyboard::HIDBootKeyboard::configure(dev, host).await {
-                Ok(mut keyboard) => {
-                    info!("Keyboard initialized");
-                    spawner.must_spawn(keyboard_task(keyboard));
-                },
-                Err(e) => {
-                    error!("Failed to configure keyboard: {}", e)
-                }
-            }
-        } else {
-            info!("Not a keyboard");
+    if hub::compatible(&dev) {
+        match hub::UsbHub::configure(&dev, host).await {
+            Ok(hub) => spawner.must_spawn(hub_task(spawner, hub, host)),
+            Err(e) => {
+                error!("Failed to configure hub: {}", e)
+            },
         }
+    } else if hid_keyboard::is_compatible(&interface0) {
+        // ================ DEBUG =====================
+        let hid_desc: hid_keyboard::HIDDescriptor = interface0.parse_class_descriptor().unwrap();
+        info!("HID descriptor: {:?}", hid_desc);
+
+        {
+            // Request report descriptor
+            let mut buffer = [0u8; 128];
+
+            // Control channel should be unlocked after use 
+            let mut cc = host.control_channel(dev.addr).await.unwrap();
+        
+            let request_buffer = &mut buffer[..hid_desc.descriptor_length0 as usize];
+            cc.interface_request_descriptor_bytes::<ReportDescriptor>(
+                interface0.interface_number, 
+                request_buffer
+            )
+            .await
+            .unwrap();
+        }
+        // ================ DEBUG =====================
+
+        match hid_keyboard::HIDBootKeyboard::configure(dev, host).await {
+            Ok(mut keyboard) => {
+                info!("Keyboard initialized");
+                spawner.must_spawn(keyboard_task(keyboard));
+            },
+            Err(e) => {
+                error!("Failed to configure keyboard: {}", e)
+            }
+        }
+    } else {
+        info!("Not a supported device");
+    }
+}
+
+#[embassy_executor::task(pool_size = 2)]
+async fn hub_task(
+    spawner: Spawner,
+    mut hub: hub::UsbHub<'static, impl UsbHostDriver>, 
+    host: &'static UsbHost<'_, impl UsbHostDriver>
+) {
+    info!("New hub");
+    loop {
+        match hub.poll().await {
+            Ok(dev) => {
+                select_usb_driver(spawner, dev, host).await;
+            },
+            Err(e) => {
+                error!("hub poll error: {}", e);
+                return
+            },
+        };
     }
 }
 
@@ -111,7 +149,7 @@ impl USBDescriptor for ReportDescriptor {
 
 mod hid_keyboard {
 
-    use embassy_usb::host::{ConfigurationDescriptor, Device, Channel, InterfaceDescriptor, UsbHost};
+    use embassy_usb::host::{Device, Channel, UsbHost, descriptor::*};
     use embassy_usb_driver::host::{channel, HostError, UsbChannel};
 
     use super::*;
@@ -231,13 +269,7 @@ mod hid_keyboard {
                 return Err(HostError::Other("Wrong number of endpoints"));
             }
 
-            // Test drop
-            let channel = {
-                let _channel0 = host.alloc_channel::<channel::Interrupt, channel::In>(dev.addr, &endpoints[0])?;
-                let _channel1 = host.alloc_channel::<channel::Interrupt, channel::In>(dev.addr, &endpoints[0])?;
-
-                host.alloc_channel(dev.addr, &endpoints[0])?
-            };
+            let channel = host.alloc_channel(dev.addr, &endpoints[0]).await?;
 
             Ok(HIDBootKeyboard {
                 channel,
