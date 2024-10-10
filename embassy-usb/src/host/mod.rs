@@ -430,7 +430,7 @@ pub struct UsbHost<'r, D: UsbHostDriver> {
 
 impl<'r, D: UsbHostDriver> UsbHost<'r, D> {
     pub fn new<const N: usize>(driver: D, registry: &'r mut UsbDeviceRegistry<N>) -> Self {
-        let channel = driver.alloc_channel(0, &EndpointDescriptor::control(0, 64), false).ok().unwrap();
+        let channel = driver.alloc_channel(0, &EndpointDescriptor::control(64), false).ok().unwrap();
         
         Self {
             driver,
@@ -514,7 +514,7 @@ impl<'r, D: UsbHostDriver> UsbHost<'r, D> {
         addr: u8,
     ) -> Result<Channel<'h, D, channel::Control, DIR>, HostError> {
         // TODO: PRE
-        self.alloc_channel(addr, &EndpointDescriptor::control(0, 64)).await
+        self.alloc_channel(addr, &EndpointDescriptor::control(64)).await
     }
 }
 

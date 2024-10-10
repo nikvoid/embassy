@@ -134,11 +134,11 @@ impl EndpointDescriptor {
     }
 
     /// Create descriptor for CONTROL endpoint
-    pub fn control(addr: u8, max_packet_size: u16) -> Self {
+    pub fn control(max_packet_size: u16) -> Self {
         Self {
             len: 8,
             descriptor_type: 0x05,
-            endpoint_address: addr,
+            endpoint_address: 0,
             attributes: EndpointType::Control as u8,
             max_packet_size,
             interval: 0,
