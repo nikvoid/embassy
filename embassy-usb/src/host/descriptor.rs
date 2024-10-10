@@ -174,7 +174,35 @@ impl USBDescriptor for ConfigurationDescriptor {
     }
 }
 
+pub struct InterfaceIterator<'a> {
+    num_interface: usize,
+    index: usize,
+    cfg_desc: &'a ConfigurationDescriptor,
+}
+
+impl<'a> Iterator for InterfaceIterator<'a> {
+    type Item = InterfaceDescriptor<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index >= self.num_interface {
+            None
+        } else {
+            let res = self.cfg_desc.parse_interface(self.index);
+            self.index += 1;
+            res
+        }
+    }
+}
+
 impl ConfigurationDescriptor {
+    pub fn iter_interface<'a>(&'a self) -> InterfaceIterator<'a> {
+        InterfaceIterator {
+            num_interface: self.num_interfaces as usize,
+            index: 0,
+            cfg_desc: &self,
+        }
+    }
+    
     /// Try to find and parse the interface with interface number `index`
     pub fn parse_interface<'a>(&'a self, index: usize) -> Option<InterfaceDescriptor<'a>> {
         if index >= self.num_interfaces as usize {
