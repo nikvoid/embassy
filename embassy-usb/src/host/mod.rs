@@ -5,6 +5,7 @@
 
 #![allow(async_fn_in_trait)]
 
+use core::future::Future;
 use core::marker::PhantomData;
 
 use embassy_futures::select::{select, Either};
@@ -41,7 +42,8 @@ where
     dev_addr: u8,
     channel: D::Channel<T, DIR>,
     driver: &'d D,
-    registry: &'d UsbDeviceRegistryRef<'d>
+    registry: &'d UsbDeviceRegistryRef<'d>,
+    disconnected: bool,
 }
 
 impl<D, T, DIR> Drop for Channel<'_, D, T, DIR>
@@ -56,6 +58,35 @@ where
     }
 }
 
+impl<D, T, DIR> Channel<'_, D, T, DIR>
+where 
+    T: channel::Type,
+    DIR: channel::Direction,
+    D: UsbHostDriver,
+{
+    /// Run future with channel disconnect check
+    /// 
+    /// Fail early if channel was disconnected already
+    async fn fuse_on_disconnect<'a, O, Fut: Future<Output = Result<O, ChannelError>> + 'a>(
+        &'a mut self, 
+        f: impl FnOnce(&'a mut D::Channel<T, DIR>) -> Fut + 'a,
+    ) -> Result<O, ChannelError> {
+        if self.disconnected {
+            return Err(ChannelError::Disconnected)
+        }
+        match select(
+            self.registry.wait_disconnect(self.dev_addr), 
+            f(&mut self.channel),
+        ).await {
+            Either::First(_) => {
+                self.disconnected = true;
+                Err(ChannelError::Disconnected)
+            },
+            Either::Second(res) => res,
+        }
+    }
+}
+
 impl<D, T, DIR> UsbChannel<T, DIR> for Channel<'_, D, T, DIR>
 where 
     T: channel::Type,
@@ -66,50 +97,26 @@ where
     where 
         T: channel::IsControl,
         DIR: channel::IsIn {
-        match select(
-            self.registry.wait_disconnect(self.dev_addr), 
-            self.channel.control_in(setup, buf)
-        ).await {
-            Either::First(_) => Err(ChannelError::Disconnected),
-            Either::Second(res) => res,
-        }
+        self.fuse_on_disconnect(|chan| chan.control_in(setup, buf)).await
     }
 
     async fn control_out(&mut self, setup: &SetupPacket, buf: &[u8]) -> Result<usize, ChannelError>
     where 
         T: channel::IsControl,
         DIR: channel::IsOut {
-        match select(
-            self.registry.wait_disconnect(self.dev_addr), 
-            self.channel.control_out(setup, buf)
-        ).await {
-            Either::First(_) => Err(ChannelError::Disconnected),
-            Either::Second(res) => res,
-        }
+        self.fuse_on_disconnect(|chan| chan.control_out(setup, buf)).await
     }
 
     async fn request_in(&mut self, buf: &mut [u8]) -> Result<usize, ChannelError>
     where 
         DIR: channel::IsIn {
-        match select(
-            self.registry.wait_disconnect(self.dev_addr), 
-            self.channel.request_in(buf)
-        ).await {
-            Either::First(_) => Err(ChannelError::Disconnected),
-            Either::Second(res) => res,
-        }
+        self.fuse_on_disconnect(|chan| chan.request_in(buf)).await
     }
 
     async fn request_out(&mut self, buf: &[u8]) -> Result<usize, ChannelError>
     where 
         DIR: channel::IsOut {
-        match select(
-            self.registry.wait_disconnect(self.dev_addr), 
-            self.channel.request_out(buf)
-        ).await {
-            Either::First(_) => Err(ChannelError::Disconnected),
-            Either::Second(res) => res,
-        }
+        self.fuse_on_disconnect(|chan| chan.request_out(buf)).await
     }
 } 
 
@@ -505,7 +512,8 @@ impl<'r, D: UsbHostDriver> UsbHost<'r, D> {
             dev_addr: addr,
             channel: self.driver.alloc_channel(addr, endpoint, needs_pre)?,
             driver: &self.driver,
-            registry: &self.registry
+            registry: &self.registry,
+            disconnected: false,
         })
     }
     

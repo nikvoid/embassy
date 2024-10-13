@@ -5,7 +5,7 @@ use atomic_polyfill::{AtomicU16, AtomicUsize, Ordering};
 use embassy_hal_internal::Peripheral;
 use embassy_sync::waitqueue::AtomicWaker;
 use embassy_usb_driver::host::{channel, ChannelError, DeviceEvent, EndpointDescriptor, HostError, SetupPacket, UsbChannel, UsbHostDriver};
-use embassy_usb_driver::EndpointType;
+use embassy_usb_driver::{Direction, EndpointType};
 
 use rp_pac::usb_dpram::vals::EpControlEndpointType;
 use crate::{interrupt::{self, typelevel::{Binding, Interrupt}}, usb::EP_MEMORY_SIZE};
@@ -37,7 +37,6 @@ impl<'d, T: Instance> Driver<'d, T> {
     ) -> Self {
         let regs = T::regs();
         unsafe {
-            // FIXME(magic):
             // zero fill regs
             let p = regs.as_ptr() as *mut u32;
             for i in 0..0x9c / 4 {
@@ -159,6 +158,46 @@ impl<'d, T: Instance, E: channel::Type, D: channel::Direction> Channel<'d, T, E,
     }
 }
 
+/// Guard to make channel futures cancel-safe
+struct ChannelSelectGuard {
+    interrupt_in: bool,
+    index: usize,
+    buffer_control: BufferControlReg,
+    ep_control: EpControlReg,
+}
+
+impl ChannelSelectGuard {
+    pub fn select<T: Instance, E: channel::Type, D: channel::Direction>(chan: &Channel<T, E, D>) -> Self {
+        chan.set_current();
+        Self {
+            interrupt_in: Channel::<T, E, D>::is_interrupt_in(),
+            index: chan.index,
+            buffer_control: chan.buffer_control(),
+            ep_control: chan.ep_control(),
+        }
+    }
+}
+
+impl Drop for ChannelSelectGuard {
+    fn drop(&mut self) {
+        trace!("CLEAR CURRENT: {}", self.index);
+        // select method ensures that this channel is active
+        if !self.interrupt_in {
+            CURRENT_CHANNEL.store(0, Ordering::Relaxed);
+        }
+        
+        self.ep_control.modify(|w| {
+            w.set_interrupt_per_buff(false);
+            w.set_enable(false);
+        });
+
+        self.buffer_control.modify(|w| {
+            w.set_available(0, false);
+        })
+    }
+}
+
+
 type BufferControlReg = rp_pac::common::Reg<rp_pac::usb_dpram::regs::EpBufferControl, rp_pac::common::RW>;
 type EpControlReg = rp_pac::common::Reg<rp_pac::usb_dpram::regs::EpControl, rp_pac::common::RW>;
 type AddrControlReg = rp_pac::common::Reg<rp_pac::usb::regs::AddrEndpX, rp_pac::common::RW>;
@@ -204,7 +243,7 @@ impl<'d, T: Instance, E: channel::Type, D: channel::Direction> Channel<'d, T, E,
     
     /// Wait for buffer to be available
     /// Returns stall status
-    async fn wait_available(&self) -> bool {
+    async fn wait_available(&self) {
         trace!("CHANNEL {} WAIT AVAILABLE", self.index);
         poll_fn(|cx| {
             // Both IN and OUT endpoints use IN registers on rp2040 in host mode
@@ -217,10 +256,9 @@ impl<'d, T: Instance, E: channel::Type, D: channel::Direction> Channel<'d, T, E,
                 self.clear_sie_status();
             }
             
-            // FIXME: Stall derived from other place
             match reg.available(0) {
                 true => Poll::Pending,
-                false => Poll::Ready(false),
+                false => Poll::Ready(()),
             }
         }).await
     }
@@ -422,12 +460,6 @@ impl<'d, T: Instance, E: channel::Type, D: channel::Direction> Channel<'d, T, E,
         });
 
         self.pid = !self.pid;
-        // TODO: SOF?
-        // T::regs().sie_ctrl().modify(|w| {
-        //     w.set_sof_en(true);
-        //     w.set_keep_alive_en(true);
-        //     w.set_pulldown_en(true); 
-        // });
 
         // FIXME: delay reason
         cortex_m::asm::delay(12);
@@ -509,19 +541,15 @@ impl<'d, T: Instance, E: channel::Type, D: channel::Direction> Channel<'d, T, E,
         // Wait transfer buffer to be free
         self.wait_ready_for_transaction().await;
         
-        // Set this channel for transaction
-        self.set_current();
+        // Select this channel for transaction
+        let _guard = ChannelSelectGuard::select(self);
         
         trace!("SEND SETUP");
         // Prepare HW
         self.set_setup_packet(setup);
         
         // Wait for SETUP end
-        let res = self.wait_transaction().await;
-
-        self.clear_current();
-
-        res
+        self.wait_transaction().await
     }
 
     /// Send status packet
@@ -529,8 +557,8 @@ impl<'d, T: Instance, E: channel::Type, D: channel::Direction> Channel<'d, T, E,
         // Wait transfer buffer to be free
         self.wait_ready_for_transaction().await;
         
-        // Set this channel for transaction
-        self.set_current();
+        // Select this channel for transaction
+        let _guard = ChannelSelectGuard::select(self);
         
         // Status packet always have DATA1
         trace!("SEND STATUS");
@@ -541,11 +569,7 @@ impl<'d, T: Instance, E: channel::Type, D: channel::Direction> Channel<'d, T, E,
             self.set_data_out(&[]);
         }
         
-        let res = self.wait_transaction().await;
-
-        self.clear_current();
-
-        res
+        self.wait_transaction().await
     }
 }
 
@@ -600,8 +624,8 @@ impl<'d, T: Instance, E: channel::Type, D: channel::Direction> UsbChannel<E, D> 
         // Wait transfer buffer to be free
         self.wait_ready_for_transaction().await;
         
-        // Set this channel for transaction
-        self.set_current();
+        // Select this channel for transaction
+        let _guard = ChannelSelectGuard::select(self);
         
         let mut count: usize = 0;
 
@@ -636,8 +660,6 @@ impl<'d, T: Instance, E: channel::Type, D: channel::Direction> UsbChannel<E, D> 
             }
         };
         
-        self.clear_current();
-        
         res
     }
 
@@ -649,8 +671,8 @@ impl<'d, T: Instance, E: channel::Type, D: channel::Direction> UsbChannel<E, D> 
         
         let regs = T::regs();
         
-        // Set this channel for transaction
-        self.set_current();
+        // Select this channel for transaction
+        let _guard = ChannelSelectGuard::select(self);
 
         let mut count = 0;
 
@@ -671,8 +693,6 @@ impl<'d, T: Instance, E: channel::Type, D: channel::Direction> UsbChannel<E, D> 
             }
         };
 
-        self.clear_current();
-               
         res
     }
 }
@@ -756,8 +776,6 @@ impl<'d, T: Instance> UsbHostDriver for Driver<'d, T> {
         channel: &mut Self::Channel<E, D>
     ) {
         if E::ep_type() == EndpointType::Interrupt {
-            // Clear interrupts
-            channel.clear_current();
             self.allocated_pipes.fetch_and(!(1 << channel.index), Ordering::Relaxed);
         }
     }
