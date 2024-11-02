@@ -165,6 +165,12 @@ pub enum HostError {
     Other(&'static str),
 }
 
+impl HostError {
+    pub fn is_disconnect(&self) -> bool {
+        matches!(self, HostError::ChannelError(ChannelError::Disconnected))
+    }
+}
+
 impl From<ChannelError> for HostError {
     fn from(value: ChannelError) -> Self {
         HostError::ChannelError(value)

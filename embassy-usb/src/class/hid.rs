@@ -62,6 +62,16 @@ pub enum ReportId {
     Feature(u8),
 }
 
+impl From<ReportId> for u16 {
+    fn from(value: ReportId) -> Self {
+        match value {
+            ReportId::In(id) => 0x0100 as u16 | id as u16,
+            ReportId::Out(id) => 0x0200 as u16 | id as u16,
+            ReportId::Feature(id) => 0x0300 as u16 | id as u16,
+        }
+    }
+}
+
 impl ReportId {
     const fn try_from(value: u16) -> Result<Self, ()> {
         match value >> 8 {
