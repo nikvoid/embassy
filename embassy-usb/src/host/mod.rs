@@ -14,6 +14,8 @@ use embassy_usb_driver::host::{channel, ChannelError, DeviceEvent, EndpointDescr
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::{MappedMutexGuard, Mutex, MutexGuard};
 
+use zerocopy::IntoBytes;
+
 use crate::control::Request;
 
 pub mod descriptor;
@@ -185,6 +187,66 @@ pub trait ControlChannelExt<D: channel::Direction>: UsbChannel<channel::Control,
         Ok(len)
     }
     
+    /// Request raw string descriptor at `index` to buffer
+    async fn request_string_descriptor_raw(
+        &mut self, 
+        index: u8,
+        buf: &mut [u8],
+    ) -> Result<usize, HostError> 
+    where D: channel::IsIn
+    {
+        // The wValue field specifies the descriptor type in the high byte
+        // and the descriptor index in the low byte.
+        let value = 3 << 8 | index as u16;
+
+        let packet = SetupPacket {
+            request_type: RequestType::IN | RequestType::TYPE_STANDARD | RequestType::RECIPIENT_DEVICE,
+            request: Request::GET_DESCRIPTOR,
+            value,                    // descriptor type & index
+            index: 0,                 // zero or language ID
+            length: buf.len() as u16, // descriptor length
+        };
+
+        let len = self.control_in(&packet, buf).await?;
+        Ok(len)
+    }
+    
+    /// Request string descriptor at `index`
+    /// 
+    /// String descriptors are generally UTF16-encoded, 
+    /// which means that each character may be either 2 or 4 bytes long.
+    /// 
+    /// As heuristic, buffer is double the size of [heapless::String] - this works well for ASCII range
+    /// and you can always specify bigger [heapless::String] container to fit other character ranges.
+    async fn request_string_descriptor<const N: usize>(
+        &mut self, 
+        index: u8,
+    ) -> Result<heapless::String<N>, HostError> 
+    where D: channel::IsIn
+    {
+        // Double the size in bytes
+        let mut buf = [0u16; N];
+        
+        // Request size 
+        self.request_string_descriptor_raw(index, &mut buf.as_bytes_mut()[..2]).await?;
+        
+        let slice_u8 = buf.as_bytes();
+        let desc_len = slice_u8[0] as usize;
+        
+        // Request all descriptor
+        self.request_string_descriptor_raw(index, &mut buf.as_bytes_mut()[..desc_len]).await?;
+
+        let slice_u8 = buf.as_bytes();
+        let utf16 = &buf[1..desc_len / 2];
+
+        // Transcode to UTF8
+        let s = heapless::String::from_iter(
+            char::decode_utf16(utf16.iter().copied())
+                .map(|c| c.unwrap_or('�'))
+        );
+        Ok(s)
+    }
+    
     /// Request the underlying bytes for an additional descriptor of a specific interface.
     /// Useful for class specific descriptors of varying length.
     /// bytes.len() determines how many bytes are read at maximum.
@@ -209,6 +271,29 @@ pub trait ControlChannelExt<D: channel::Direction>: UsbChannel<channel::Control,
 
         let len = self.control_in(&packet, buf).await?;
         Ok(len)
+    }
+    
+    /// Execute a control request with request type Class and recipient Interface
+    async fn class_request_in(
+        &mut self, 
+        request: u8, 
+        value: u16, 
+        index: u16, 
+        buf: &mut [u8]
+    ) -> Result<(), HostError>
+    where D: channel::IsIn
+    {
+        let packet = SetupPacket {
+            request_type: RequestType::IN | RequestType::TYPE_CLASS | RequestType::RECIPIENT_INTERFACE,
+            request,
+            value,
+            index,
+            length: buf.len() as u16,
+        };
+        
+        self.control_in(&packet, buf).await?;
+
+        Ok(())
     }
 
     // CONTROL OUT methods
