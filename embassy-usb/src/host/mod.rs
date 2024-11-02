@@ -258,7 +258,7 @@ pub trait ControlChannelExt<D: channel::Direction>: UsbChannel<channel::Control,
         request: u8, 
         value: u16, 
         index: u16, 
-        buf: &mut [u8]
+        buf: &[u8]
     ) -> Result<(), HostError>
     where D: channel::IsOut
     {
