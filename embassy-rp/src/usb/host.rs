@@ -129,12 +129,11 @@ impl<'d, T: Instance, E: channel::Type, D: channel::Direction> Channel<'d, T, E,
         assert!(buf_addr + buf_len <= EP_MEMORY_SIZE as u16);
         assert!(desc.max_packet_size <= buf_len);
 
-        // TODO: Support isochronous, bulk, and interrupt OUT
+        // TODO: Support isochronous and bulk
         assert!(E::ep_type() != EndpointType::Isochronous);
         assert!(E::ep_type() != EndpointType::Bulk);
-        assert!(!(E::ep_type() == EndpointType::Interrupt && D::is_out()));
         
-        if desc.ep_type() == EndpointType::Interrupt {
+        if Self::is_interrupt_in() {
             assert!(index > 0 && index < 16);
         } else {
             assert!(index >= 16);
@@ -370,8 +369,8 @@ impl<'d, T: Instance, E: channel::Type, D: channel::Direction> Channel<'d, T, E,
             self.addr_endp_host().write(|w| { 
                 w.set_address(self.dev_addr);
                 w.set_endpoint(self.ep_addr);
-                // FIXME: INTERRUPT OUT?
-                w.set_intep_dir(D::is_out());
+                // Only for INTERRRUPT IN
+                w.set_intep_dir(false);
                 w.set_intep_preamble(self.pre)
             });
         } else {
@@ -495,8 +494,6 @@ impl<'d, T: Instance, E: channel::Type, D: channel::Direction> Channel<'d, T, E,
     /// Set DATA OUT transaction and copy data to buffer
     /// Returns count of copied bytes
     fn set_data_out(&mut self, data: &[u8]) -> usize {        
-        assert!(E::ep_type() != EndpointType::Interrupt);
-
         let chunk = if data.len() > 0 {
            data.chunks(self.max_packet_size as _).next().unwrap() 
         } else {
