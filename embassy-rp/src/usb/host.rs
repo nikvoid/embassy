@@ -337,6 +337,11 @@ impl<'d, T: Instance, E: channel::Type, D: channel::Direction> Channel<'d, T, E,
             Poll::Pending
         }).await;
         
+        // Stop on error
+        T::regs().sie_ctrl().modify(|w| {
+            w.set_stop_trans(true);
+        });
+        
         res
     }
 
