@@ -168,6 +168,13 @@ impl<'d> RingBufferedUartRx<'d> {
         }
     }
 
+    /// Get count of bytes that are readily available in buffer
+    ///
+    /// If there are DMA errors, return 0
+    pub fn available(&mut self) -> usize {
+        self.ring_buf.len().unwrap_or(0)
+    }
+
     /// Wait for uart idle or dma half-full or full
     async fn wait_for_data_or_idle(&mut self) -> Result<(), Error> {
         compiler_fence(Ordering::SeqCst);
