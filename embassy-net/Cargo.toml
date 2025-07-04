@@ -112,7 +112,7 @@ log = { version = "0.4.14", optional = true }
 smoltcp = {  version = "0.13.0", default-features = false, features = [
   "socket",
   "async",
-] }
+], git = "https://github.com/nikvoid/smoltcp", rev = "4bebdf8" }
 
 embassy-net-driver = { version = "0.2.0", path = "../embassy-net-driver" }
 embassy-time = { version = "0.5.1", path = "../embassy-time" }

@@ -25,6 +25,7 @@ pub mod tcp;
 mod time;
 #[cfg(feature = "udp")]
 pub mod udp;
+pub mod ether;
 
 use core::cell::RefCell;
 use core::future::{Future, poll_fn};
