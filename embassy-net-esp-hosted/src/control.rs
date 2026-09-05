@@ -226,6 +226,14 @@ impl<'a> Control<'a> {
     /// Get hardware address
     ///
     /// Use after `init` method successful execution
+    ///
+    /// This method may be used to update interface hardware address if you have initialized
+    /// network stack before this device
+    ///
+    /// ```rust,no_run
+    /// use embassy_net::wire::HardwareAddress;
+    /// iface.set_hardware_addr(HardwareAddress::from_driver(ctl.hardware_address()).unwrap());
+    /// ```
     pub fn hardware_address(&self) -> HardwareAddress {
         self.state_ch.get_hardware_address()
     }
