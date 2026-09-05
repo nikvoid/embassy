@@ -241,13 +241,13 @@ where
         loop {
             if let ioctl::ControlState::Reboot = self.shared.state() {
                 self.state_ch.set_link_state(LinkState::Down);
-                
+
                 debug!("resetting...");
                 self.reset.set_low().unwrap();
                 Timer::after_millis(100).await;
                 self.reset.set_high().unwrap();
                 Timer::after_millis(1000).await;
-                
+
                 self.heartbeat_deadline = Instant::now() + HEARTBEAT_MAX_GAP;
                 self.backend = Backend::default();
                 self.iface.init(true).await;
